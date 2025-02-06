@@ -14,6 +14,9 @@ library(arrow)
 library(tidyverse)
 library(patchwork)
 
+# Color library
+library(PNWColors)
+
 # Map creation
 library(rnaturalearth)
 library(rnaturalearthdata)
@@ -33,6 +36,7 @@ library(ggsankey)
 devtools::install_github("Seafood-Globalization-Lab/exploreARTIS@v1.0.0", dependencies = TRUE)
 library(exploreARTIS)
 
+# Databases
 library(rgbif)
 library(robis)
 
@@ -209,11 +213,11 @@ if (!file.exists("data/slb_presences_country.parquet")) {
 
 ```{r Read in + analyze sealifebase data}
 # Read in sealifebase data
-slb <- read_parquet("data/slb_presenceS_country.parquet")
+slb <- read_parquet("../data/slb_presenceS_country.parquet")
 slb <- slb %>% 
-  rename(CommonName = "Species") %>%
-  mutate(Species = str_split(CommonName, " ")[[1]][1])
-slb_common_names <- read_parquet("data/slb_common_names.parquet")
+  rename(ScientificName = "Species") %>%
+  mutate(Species = str_split(ScientificName, " ")[[1]][1])
+slb_common_names <- read_parquet("../data/slb_common_names.parquet")
 
 # Read in HDI data
 hdi <- read_csv("data/hdi.csv")
@@ -364,7 +368,7 @@ num_all_genus_iso3c %>%
   theme_light()
 ```
 
-```{r obtain NOAA data}
+```{r analyze NOAA data}
 bottom_trawl_2015_2024 <- read.csv("data/2015_2024.csv")
 bottom_trawl_2014_2005 <- read.csv("data/2014_2005.csv")
 bottom_trawl_2004_1995 <- read.csv("data/2004_1995.csv")
@@ -386,7 +390,7 @@ trawl_data %>% group_by(Survey.year, Survey.name) %>%
 
 ```
 
-```{r}
+```{r analyze GBIF data}
 # Obtain country information
 countries <- occ_count_country() %>%
   pull(iso2)
@@ -455,6 +459,118 @@ result$data %>%
 str_trunc("paleontologist", 5, "right", ellipsis = "")
 ```
 
+
+```{r analyze OBIS data}
+# Get list of exploited decapods (from fishbase)
+exploited_decapods <- slb %>%
+  filter(Order == "Decapoda", 
+         Importance %in% c("commercial",
+                           "highly commercial",
+                           "minor commercial")) %>%
+  mutate(ScientificName = str_to_lower(ScientificName)) %>%
+  pull(ScientificName)
+
+# Obtain exploited decapod data from OBIS (Needs to be segmented as API won't allow for one large pull)
+exploited_decapods_obis_001_100 <- occurrence(scientificname = exploited_decapods[1:100])
+exploited_decapods_obis_101_200 <- occurrence(scientificname = exploited_decapods[101:200]) 
+exploited_decapods_obis_201_300 <- occurrence(scientificname = exploited_decapods[201:300]) 
+exploited_decapods_obis_301_400 <- occurrence(scientificname = exploited_decapods[301:400]) 
+exploited_decapods_obis_401_435 <- occurrence(scientificname = exploited_decapods[401:435])
+
+# Obtain all decapoda data
+all_decapods_obis <- occurence(scientificname = "Decapoda")
+
+# Combine separated files
+exploited_obis <- bind_rows(exploited_decapods_obis_001_100, 
+                            exploited_decapods_obis_101_200,
+                            exploited_decapods_obis_201_300,
+                            exploited_decapods_obis_301_400,
+                            exploited_decapods_obis_401_435)
+
+# Clean exploited_obis_data
+obis_clean <- exploited_obis %>%  
+mutate(individualCount = as.numeric(individualCount), 
+       date_year = make_date(date_year, 1, 1), iso3 = countrycode(country, origin = "country.name", destination = "iso3c")) %>%
+  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
+  filter(!is.na(individualCount), !is.na(date_year)) %>%
+  rename(date = "date_year", count = "individualCount")
+
+# Write file to parquet
+write_parquet(exploited_obis, "../data/exploited_obis.parquet")
+
+# Continents spatial extent
+continents <- ne_countries(scale = "medium", returnclass = "sf", continent = c("Africa", "Antarctica", "Asia", "Europe", "North America", "Oceania", "South America"))
+ 
+# Convert the dataset to an sf object
+data_sf <- st_as_sf(exploited_obis, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+
+# Perform the spatial join to determine the continent
+data_with_continent <- st_join(data_sf, continents, join = st_intersects)
+
+# Pipe occurence into this
+occurrence_data <- exploited_obis %>%  
+mutate(individualCount = as.numeric(individualCount), 
+       date_year = make_date(date_year, 1, 1), iso3 = countrycode(country, origin = "country.name", destination = "iso3c")) %>%
+  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
+  filter(!is.na(individualCount), !is.na(date_year)) %>%
+  group_by(date_year, region) %>%
+  summarize(count = sum(individualCount)) %>%
+  rename(date = "date_year") %>%
+  ungroup()
+
+# Pipe occurence into this
+occurrence_data <- data_with_continent %>%  
+mutate(individualCount = as.numeric(individualCount), 
+       date_year = make_date(date_year, 1, 1)) %>%
+  filter(!is.na(individualCount), !is.na(date_year)) %>%
+  rename(date = "date_year", region = "continent.y") %>%
+  group_by(date, region) %>%
+  summarize(count = sum(individualCount)) %>%
+  ungroup()
+
+
+# Occurence trends, by region (decapods)
+occurrence_data %>%
+      ggplot(aes(x = date, y = log(count), color = region)) +
+      geom_line() +
+      theme_light() +
+      labs(x = "", y = "Decapoda count", color = "Region") +
+      geom_point() +
+      scale_color_manual(values = pnw_palette("Bay",7)) +
+      facet_wrap(~ region) +
+      guides(color = "none")
+
+# Occurece data trends, globally (decapods)
+(decapoda_global_trends <- obis_clean %>%
+  group_by(date) %>%
+  summarize(count = sum(count)) %>%
+      ggplot(aes(x = date, y = log(count))) +
+      geom_line() +
+      theme_light() +
+      labs(x = "", y = " Log transformed decapoda count") +
+      geom_point() +
+      geom_smooth(color = "#E29A86", method = "gam", fill = "#E29A86"))
+
+# Occurece data trends, globally by families within decapods
+
+
+(decapoda_family_trends <- obis_clean %>%
+  group_by(date, family) %>%
+  summarize(count = sum(count)) %>%
+  group_by(family) %>%
+  mutate(num_years = n_distinct(date)) %>%
+  filter(num_years >= 10) %>%
+      ggplot(aes(x = date, y = log(count), color = family)) +
+      geom_line() +
+      theme_light() +
+      labs(x = "", y = "Log observations recorded") +
+      geom_point() +
+      facet_wrap(~ family) +
+  guides(color = "none") +
+  scale_color_manual(values = pnw_palette("Bay",16)))
+
+```
+
 ```{r Save images}
 ggsave("images/all_species_count_map.jpg", plot = all_species_count_map, device = "jpeg", width = 6, height = 4)
 
@@ -468,27 +584,23 @@ ggsave("images/introduced_species_map.jpg", plot = introduced_species_map, devic
 
 ggsave("images/introduced_genus_map.jpg", plot = introduced_genus_map, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/species_hdi.jpg", plot = species_hdi, device = "jpeg", width = 6, height = 4)
+ggsave("../images/species_hdi.jpg", plot = species_hdi, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/genus_hdi.jpg", plot = genus_hdi, device = "jpeg", width = 6, height = 4)
+ggsave("../images/genus_hdi.jpg", plot = genus_hdi, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/species_box.jpg", plot = species_box, device = "jpeg", width = 6, height = 4)
+ggsave("../images/species_box.jpg", plot = species_box, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/genus_box.jpg", plot = genus_box, device = "jpeg", width = 6, height = 4)
+ggsave("../images/genus_box.jpg", plot = genus_box, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/decapoda_total.jpg", plot = decapoda_total, device = "jpeg", width = 6, height = 4)
+ggsave("../images/decapoda_total.jpg", plot = decapoda_total, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/decapoda_country.jpg", plot = decapoda_country, device = "jpeg", width = 6, height = 4)
+ggsave("../images/decapoda_country.jpg", plot = decapoda_country, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/ostracoda_total.jpg", plot = ostracoda_total, device = "jpeg", width = 6, height = 4)
+ggsave("../images/ostracoda_total.jpg", plot = ostracoda_total, device = "jpeg", width = 6, height = 4)
 
-ggsave("images/ostracoda_country.jpg", plot = ostracoda_country, device = "jpeg", width = 6, height = 4)
+ggsave("../images/ostracoda_country.jpg", plot = ostracoda_country, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_family_trends.jpg", plot = decapoda_family_trends, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_global_trends.jpg", plot = decapoda_global_trends, device = "jpeg", width = 6, height = 4)
 ```
-
-```{r}
-occurrence(scientificname = "Decapoda", startdate = make_date(2023, 1, 1)) %>%
-  mutate(individualCount = as.numeric(individualCount)) %>%
-  filter(!is.na(individualCount)) %>%
-  summarize(sum = sum(individualCount))
-```
-
