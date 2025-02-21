@@ -1,0 +1,984 @@
+---
+title: "Shrimp Analysis (FISH 513)"
+author: "Connor Quiroz"
+date: "2025-01-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# For reading in .parquet files
+library(arrow)
+library(cowplot)
+
+# Data processing package
+library(tidyverse)
+library(patchwork)
+library(countrycode) # convert countries to iso3c
+
+# Color library
+library(PNWColors)
+
+# Map creation
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+
+# For Packages for fishbase
+# remotes::install_github("cboettig/duckdbfs", force = TRUE)
+# remotes::install_github("ropensci/rfishbase")
+library(duckdbfs)
+library(rfishbase)
+
+# Load in packages needed for ARTIS
+library(devtools)
+library(tidytext)
+# devtools::install_github("davidsjoberg/ggsankey")
+library(ggsankey)
+# devtools::install_github("Seafood-Globalization-Lab/exploreARTIS@v1.0.0", dependencies = TRUE)
+library(exploreARTIS)
+
+# Databases
+library(rgbif)
+library(robis)
+```
+
+```{r create function}
+# Ocean polygon
+ocean <- st_polygon(list(cbind(c(seq(-180, 179, len = 100), rep(180, 100), 
+                        seq(179, -180, len = 100), rep(-180, 100)),
+                      c(rep(-90, 100), seq(-89, 89, len = 100),
+                        rep(90, 100), seq(89, -90, len = 100))))) |>
+  st_sfc(crs = "WGS84") |>
+  st_as_sf()
+
+# Make map creation simpler
+create_map <- function(data, fill = "num_species") {
+  world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+world_map <- world_map %>%
+  left_join(data, by = c("iso_a3" = "country"))
+  
+  world_map %>%
+ggplot() +
+  geom_sf(data = ocean, fill = "#8080ff80") +
+  geom_sf(aes(fill = !!sym(fill)), color = "black") + 
+  scale_fill_viridis_c(option = "plasma") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  coord_sf(crs = "+proj=robin")
+}
+
+
+# FUNCTION DEFINITION: Obtain gbif abundance data
+  gbif_abundance <- function(scientific_name = "") {
+  # Create an empty data frame to store date and count
+    
+  gbif_data <- data.frame()
+  # Loop over each year from 1920 to 2024
+
+    
+  for (j in countries) {
+    result <- data.frame(
+      date = make_date(2024:2024, 1, 1),
+      country = rep(j, each = length(2024:2024)),
+      count = NA
+    )
+    for (i in 2024:2024) {
+      # Fetch count of occurrences for the given scientific name and year
+      value <- occ_count(scientificName = scientific_name,
+                         year = i,
+                         country = j)
+      
+      # Assign the count value to the respective row in the result data frame
+      result$count[which(result$date == make_date(i, 1, 1) &
+                           result$country == j)] <- value
+      print(c(i,j))
+    }
+    gbif_data <- bind_rows(gbif_data, result)
+    
+  }
+  
+  return(gbif_data)
+  }
+  
+
+# FUNCTION DEFINITION: Obtain gbif abundance data
+gbif_abundance <- function(scientific_name = "", countries) {
+  # Create an empty data frame to store the data
+  gbif_data <- data.frame()
+  
+  # Create an empty list to collect debug information
+  debug_info <- list()
+  
+  # Loop over each country in the countries list
+  for (j in countries) {
+    result <- data.frame(
+      date = make_date(1920:2024, 1, 1),
+      country = rep(j, each = length(1920:2024)),
+      count = NA
+    )
+    
+    # Loop over each year from 1920 to 2024
+    for (i in 1920:2024) {
+      # Fetch count of occurrences for the given scientific name, year, and country
+      value <- tryCatch({
+        occ_count(scientificName = scientific_name, year = i, country = j)
+      }, error = function(e) {
+        debug_info[[length(debug_info) + 1]] <- paste("Error fetching data for", scientific_name, "in", j, "for year", i)
+        return(NA)  # Return NA if there's an error
+      })
+      
+      # If the API returns a valid count, assign it to the result data frame
+      if (!is.null(value)) {
+        result$count[which(result$date == make_date(i, 1, 1) & result$country == j)] <- value
+      }
+      
+      # Store debug information (e.g., year, country, occurrences) without printing
+      debug_info[[length(debug_info) + 1]] <- paste("Year:", i, "Country:", j, "Occurrences:", value)
+    }
+    
+    # Bind the result data to the main dataframe
+    gbif_data <- bind_rows(gbif_data, result)
+  }
+  
+  # After the function finishes, print the debug info
+  # You can view the debug info if needed by uncommenting the following line:
+  # print(debug_info)
+  
+  # Return the final GBIF data frame
+  return(gbif_data)
+}
+
+
+
+# FUNCTION DEFINITION: Create time series of previously obtained gbif data
+gbif_time_series <- function(data = data,
+                             taxa_name = "",
+                             group_by_region = TRUE) {
+  if (group_by_region == TRUE) {
+    plot <- data %>%
+      group_by(date, region) %>%
+      drop_na() %>%
+      summarize(count = sum(count)) %>%
+      drop_na() %>%
+      ggplot(aes(x = date, y = count, color = region)) +
+      geom_line() +
+      theme_light() +
+      labs(x = "", y = paste0(taxa_name, " count"), color = "Region") +
+      scale_color_manual(values = artis_palette(7))
+  }
+  else {
+    plot <- data %>%
+      group_by(date) %>%
+      drop_na() %>%
+      summarize(count = sum(count)) %>%
+      ggplot(aes(x = date, y = count)) +
+      geom_line() +
+      labs(x = " ", y = paste0(taxa_name, " count")) +
+      theme_light() +
+      geom_smooth(method = "")
+  }
+  return(plot)
+}
+```
+
+
+```{r  Obtain sealifebase data}
+if (!file.exists("data/slb_presences_country.parquet")) {
+  # Obtain SLB country() data + species codes
+  slb_presences_country <- country(server = "sealifebase")
+  slb_species_codes <- load_taxa(server = "sealifebase")
+  
+  # Join SLB country() to species codes
+  slb_presences_country <- slb_presences_country %>%
+    left_join(slb_species_codes, by = "SpecCode")
+  
+  if (!file.exists("data/slb_common_names.parquet")) {
+    # Get SLB common names
+  slb_common_names <- common_names(species_list = slb_species, server = "sealifebase")
+  }
+  
+  # Write files to .parquet
+  write_parquet(slb_presences_country, "data/slb_presences_country.parquet")
+  write_parquet(slb_common_names, "data/slb_common_names.parquet")
+}
+```
+
+> Last date obtained: January 7
+
+```{r Read in + analyze sealifebase data}
+# Read in sealifebase data
+slb <- read_parquet("../data/slb_presenceS_country.parquet")
+slb <- slb %>% 
+  rename(ScientificName = "Species") %>%
+  mutate(Species = str_split(ScientificName, " ")[[1]][1])
+slb_common_names <- read_parquet("../data/slb_common_names.parquet")
+
+# Read in HDI data
+hdi <- read_csv("data/hdi.csv")
+hdi <- hdi %>%
+  mutate(country = countrycode(country, origin = "country.name", destination = "iso3c")) %>%
+  exploreARTIS::add_region("country", region.col.name = "region")
+
+# Reorganize column names 
+slb <- slb %>%
+  relocate(c("ScientificName", "Genus", "Species"), .after = "SpecCode")
+
+# Join scinames to common names
+slb <- left_join(slb, slb_common_names[,c(2,4)], by = "SpecCode") %>%
+  relocate("ComName", .after = "Species")
+
+slb_shrimp <- slb %>%
+  filter(str_detect(ComName, regex("shrimp", ignore_case = TRUE)))
+
+# Obtain number of all shrimp species
+# Need to manually assign iso3c values
+num_all_species_iso3c <- slb_shrimp %>%
+  group_by(country) %>%
+  distinct(Species) %>%
+  summarize(num_species = length(Species)) %>%
+  arrange(-num_species) %>%
+  mutate(country = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+# Same thing but for genus
+num_all_genus_iso3c <- slb_shrimp %>%
+  group_by(country) %>%
+  distinct(Genus) %>%
+  summarize(num_species = length(Genus)) %>%
+  arrange(-num_species) %>%
+  mutate(country = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+# Obtain number of all commercial shrimp species
+num_commercial_species <- slb_shrimp %>%
+  filter(Importance %in% c("minor commercial", "highly commercial", "commercial", "subsistence fisheries", "of potential interest") | (!is.na(Aquaculture) & Aquaculture != "never/rarely"), Status != "misidentification")
+
+# Obtain number of all commercial shrimp species
+num_commercial_species_iso3c <- num_commercial_species %>%
+  group_by(country) %>%
+  distinct(Species) %>%
+  summarize(num_species = length(Species)) %>%
+  arrange(-num_species) %>%
+  mutate(country = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+# ... genus
+num_commercial_genus_iso3c <- num_commercial_species %>%
+  group_by(country) %>%
+  distinct(Genus) %>%
+  summarize(num_species = length(Genus)) %>%
+  arrange(-num_species) %>%
+  mutate(country = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+# Obtain number of introduced shrimp species
+introduced_species <- slb_shrimp %>%
+  filter(Status == "introduced") %>%
+  group_by(country) %>%
+  distinct(Species) %>%
+  summarize(num_species = length(Species)) %>%
+  arrange(-num_species) %>%
+  mutate(country = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+introduced_genus <- slb_shrimp %>%
+  filter(Status == "introduced") %>%
+  group_by(country) %>%
+  distinct(Genus) %>%
+  summarize(num_species = length(Genus)) %>%
+  arrange(-num_species) %>%
+  mutate(country = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+left_join(introduced_genus, hdi, by = "country") %>%
+    filter(!is.na(region)) %>%
+  ggplot(aes(x = hdi, y = log(num_species), color = region)) +
+  geom_point() +
+    scale_color_viridis_d(end = 0.9) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Human Development Index", y = "log(Shrimp Species Count", color = "Region") +
+    theme_light()
+```
+
+```{r plot data}
+(all_species_count_map <- create_map(num_all_species_iso3c) +
+  labs(fill = "Shrimp species count"))
+
+(all_genus_count_map <- create_map(num_all_genus_iso3c) +
+  labs(fill = "Shrimp genus count"))
+
+(commercial_species_count_map <- create_map(num_commercial_species_iso3c) +
+  labs(fill = "Commercial Shrimp Species Count"))
+
+(commercial_genus_count_map <- create_map(num_commercial_genus_iso3c) +
+  labs(fill = "Commercial Shrimp Genus Count"))
+
+(introduced_species_map <- create_map(introduced_species) +
+  labs(fill = "Shrimp species count"))
+
+(introduced_genus_map <- create_map(introduced_genus) +
+  labs(fill = "Shrimp species count"))
+
+(species_hdi <- left_join(num_all_species_iso3c, hdi, by = "country") %>%
+    filter(!is.na(region)) %>%
+  ggplot(aes(x = hdi, y = log(num_species), color = region)) +
+  geom_point() +
+    scale_color_viridis_d(end = 0.9) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Human Development Index", y = "log(Shrimp Species Count", color = "Region") +
+    theme_light())
+
+(genus_hdi <- left_join(num_all_genus_iso3c, hdi, by = "country") %>%
+    filter(!is.na(region)) %>%
+  ggplot(aes(x = hdi, y = log(num_species), color = region)) +
+  geom_point() +
+    scale_color_viridis_d(end = 0.9) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Human Development Index", y = "log(Shrimp Genus Count", color = "Region") +
+    theme_light())
+
+(species_box <- num_all_species_iso3c %>%
+  exploreARTIS::add_region("country", region.col.name = "region") %>%
+  filter(!is.na(region), region != "Antarctica") %>%
+  ggplot(aes(x = region, y = num_species, fill = region)) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(alpha = 0.5) +
+  scale_fill_manual(values = artis_palette(7)) +
+  theme_light() +
+  labs(x = "", y = "Shrimp species count") +
+  guides(fill = "none"))
+
+(genus_box <- num_all_genus_iso3c %>%
+  exploreARTIS::add_region("country", region.col.name = "region") %>%
+  filter(!is.na(region), region != "Antarctica") %>%
+  ggplot(aes(x = region, y = num_species, fill = region)) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(alpha = 0.5) +
+  scale_fill_manual(values = artis_palette(7)) +
+  theme_light() +
+  labs(x = "", y = "Shrimp species count") +
+  guides(fill = "none"))
+
+num_all_genus_iso3c %>%
+  exploreARTIS::add_region("country", region.col.name = "region") %>%
+  filter(!is.na(region), region != "Antarctica") %>%
+  ggplot(aes(x = region, y = num_species, fill = region)) +
+  geom_boxplot() +
+  scale_fill_manual(values = artis_palette(7)) +
+  theme_light()
+```
+
+```{r analyze NOAA data}
+bottom_trawl_2015_2024 <- read_csv("data/2015_2024.csv")
+bottom_trawl_2014_2005 <- read_csv("data/2014_2005.csv")
+bottom_trawl_2004_1995 <- read_csv("data/2004_1995.csv")
+bottom_trawl_1994_1982 <- read_csv("data/1994_1982.csv")
+
+# Combine csv's
+trawl_data <- bind_rows(bottom_trawl_2015_2024,
+          bottom_trawl_2014_2005,
+          bottom_trawl_2004_1995,
+          bottom_trawl_1994_1982)
+
+# Decapods in Aleutian Islands
+trawl_data %>% group_by(Survey.year, Survey.name) %>%
+  summarize(weight = sum(Taxon.weight..kg.)) %>%
+  ggplot(aes(x = Survey.year, y = weight, color = Survey.name)) +
+  geom_line() +
+  theme_light() + 
+  labs(x = "", y = "Total Decapoda Weight (kg)", color = "Alaskan Bottom Trawl Survey")
+
+```
+
+```{r analyze GBIF data}
+# Obtain country information
+countries <- occ_count_country() %>%
+  pull(iso2)
+
+# Obtaining gbif abundance information by country
+shrimp_gbif <- gbif_abundance(scientific_name = "Decapoda", countries)
+ostracoda_gbif <- gbif_abundance(scientific_name = "Ostracoda", countries)
+
+shrimp_gbif_modified <- left_join(shrimp_gbif, occ_count_country() %>% select(iso2, iso3), by = c("country" = "iso2")) %>%
+  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
+  rename(iso3c = "iso3")
+
+ostracoda_gbif_modified <- left_join(ostracoda_gbif, occ_count_country() %>% select(iso2, iso3), by = c("country" = "iso2")) %>%
+  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
+  rename(iso3c = "iso3")
+  
+
+decapoda_total <- gbif_time_series(shrimp_gbif_modified, taxa_name = "Decapoda", group_by_region = FALSE)
+decapoda_country <- gbif_time_series(shrimp_gbif_modified, taxa_name = "Decapoda", group_by_region = TRUE)
+
+pstracoda_total <- gbif_time_series(ostracoda_gbif_modified, taxa_name = "Ostracoda", group_by_region = FALSE)
+ostracoda_country <- gbif_time_series(ostracoda_gbif_modified, taxa_name = "Ostracoda", group_by_region = TRUE)
+
+
+ # %>% filter(date > make_date(1980, 1, 1)) Pipe data through filter if needed
+
+result
+
+shrimp_gbif_modified %>%
+  group_by(date) %>%
+  drop_na() %>%
+  summarize(count = sum(count)) %>%
+  ggplot(aes(x = date, y = count)) +
+  geom_line()
+occ_search(scientificName = "Ostracoda")
+
+# Plot target taxa time series
+gbif_time_series(shrimp_gbif, taxa_name = "Decapoda")
+gbif_time_series(ostracoda_gbif, taxa_name = "Ostracoda")
+
+
+result$data  # View the data
+occ_search(scientificName = "Macrobrachium", limit = 1321)$data %>%
+  group_by(year) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = year, y = count)) +
+  geom_line()
+  
+
+# Do not include conutries - quicker 
+dataa <- data.frame(date = 1920:2024, count = NA)
+for (i in 1920:2024) {
+  result <- occ_count(scientificName = "Decapoda", year = i)
+  dataa$count[which(dataa$date == i)] <- result
+}
+
+gbif_time_series(dataa, taxa_name = "Decapda", group_by_region = FALSE)
+  
+result$data %>%
+  mutate(eventDate = str_trunc(eventDate, 4, ellipsis = ""),
+         eventDate = make_date(eventDate, 1, 1)) %>%
+  group_by(eventDate) %>%
+  summarize(total = n()) %>%
+  ggplot(aes(x = eventDate, y = total)) +
+  geom_line()
+str_trunc("paleontologist", 5, "right", ellipsis = "")
+```
+
+
+```{r analyze OBIS data}
+# Get list of exploited decapods (from sealifebase)
+exploited_decapods <- slb %>%
+  filter(Order == "Decapoda", 
+         Importance %in% c("commercial",
+                           "highly commercial",
+                           "minor commercial")) %>%
+  mutate(ScientificName = str_to_lower(ScientificName)) %>%
+  pull(ScientificName)
+
+exploited_decapods_common <- slb %>%
+  filter(Order == "Decapoda", 
+         Importance %in% c("commercial",
+                           "highly commercial",
+                           "minor commercial")) %>%
+  mutate(ComName = str_to_lower(ComName)) %>%
+  pull(ComName)
+
+# get list of unexploited decapods (from sealifebase)
+unexploited_decapods <- slb %>%
+  filter(Order == "Decapoda", 
+         !Importance %in% c("commercial",
+                           "highly commercial",
+                           "minor commercial")) %>%
+  mutate(ScientificName = str_to_lower(ScientificName)) %>%
+  pull(ScientificName)
+
+# Proportion of exploited to unexploited decapods
+length(exploited_decapods) / (length(unexploited_decapods) + length(exploited_decapods))
+
+# Obtain exploited decapod data from OBIS (Needs to be segmented as API won't allow for one large pull)
+exploited_decapods_obis_001_100 <- occurrence(scientificname = exploited_decapods[1:100])
+exploited_decapods_obis_101_200 <- occurrence(scientificname = exploited_decapods[101:200]) 
+exploited_decapods_obis_201_300 <- occurrence(scientificname = exploited_decapods[201:300]) 
+exploited_decapods_obis_301_400 <- occurrence(scientificname = exploited_decapods[301:400]) 
+exploited_decapods_obis_401_435 <- occurrence(scientificname = exploited_decapods[401:435])
+
+# Obtain all decapoda data
+all_decapods_obis <- occurrence(scientificname = "Decapoda")
+
+# Write file to parquet
+write_parquet(all_decapods_obis, "../data/all_decapods_obis.parquet")
+all_decapods_obis <- read_parquet("../data/all_decapods_obis.parquet")
+
+# Combine separated files
+exploited_obis <- bind_rows(exploited_decapods_obis_001_100, 
+                            exploited_decapods_obis_101_200,
+                            exploited_decapods_obis_201_300,
+                            exploited_decapods_obis_301_400,
+                            exploited_decapods_obis_401_435)
+
+# Write file to parquet
+write_parquet(exploited_obis, "../data/exploited_obis.parquet")
+exploited_obis <- read_parquet("../data/exploited_obis.parquet")
+
+# Clean exploited_obis_data
+obis_clean <- exploited_obis %>%  
+mutate(individualCount = as.numeric(individualCount), 
+       date_year = make_date(date_year, 1, 1), iso3 = countrycode(country, origin = "country.name", destination = "iso3c")) %>%
+  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
+  filter(!is.na(individualCount), !is.na(date_year)) %>%
+  rename(date = "date_year", count = "individualCount")
+
+# same thing bug for all decapods
+obis_clean_all_decapods <- all_decapods_obis %>% 
+  filter(!is.na(individualCount), 
+         !scientificName %in% exploited_decapods) %>%
+  mutate(depth = as.numeric(depth),
+         individualCount = as.numeric(individualCount), 
+         date_year = make_date(date_year, 1, 1),
+         year = as.numeric(year),
+         iso3 = countrycode(country, origin = "country.name", destination = "iso3c"),
+         scientificName = str_to_lower(scientificName)) %>%
+  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
+  filter(!is.na(date_year)) %>%
+  rename(date = "date_year", count = "individualCount")
+
+ocean_data <- st_read("../data/GOaS_v1_20211214/goas_v01.shp")
+
+# Convert the dataset to an sf object
+data_sf <- st_as_sf(obis_clean, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+
+# Join ocean geometry / obis data
+ocean_data <- st_transform(ocean_data, crs = 3857)  
+data_sf <- st_transform(data_sf, crs = 3857)
+ocean_buffered <- st_buffer(ocean_data, dist = 10000)
+joined_data <- st_join(data_sf, ocean_buffered, join = st_intersects)
+obis_exploited_regions <- st_transform(joined_data, crs = 4326)
+
+# Clean joined ocean geometry / obis data and convert back into regular dataframe
+obis_exploited_regions <- obis_exploited_regions %>%
+  rename(ocean = "name")
+obis_exploited_regions_df <- obis_exploited_regions %>% 
+  st_drop_geometry()
+
+obis_clean %>% 
+  filter(!is.na(depth)) %>%
+  ggplot(aes(x = depth)) +
+  geom_histogram(binwidth = 2, color = "black") +
+  xlim(0, 200)
+
+obis_clean_all_decapods %>% 
+  filter(!is.na(depth)) %>%
+  ggplot(aes(x = depth)) +
+  geom_histogram(binwidth = 2, color = "black") +
+  xlim(0, 200)
+obis_clean_all_decapods %>%
+  distinct(year) %>%
+  arrange(year)
+
+world_map <- map_data("world")
+
+# Plot the points on the world map
+ggplot() +
+  geom_hex(
+    data = obis_clean_all_decapods, 
+    aes(x = decimalLongitude, y = decimalLatitude),
+    bins = 30) +
+  # 1) Land polygons
+  geom_map(
+    data = world_map, map = world_map,
+    aes(x = long, y = lat, map_id = region),
+    fill = "#234145",     # Land color
+    color = "black", 
+    size = 0.1
+  ) +
+  scale_fill_viridis_c(option = "C", trans = "log") +
+  labs(
+    ,
+    x = "Longitude", 
+    y = "Latitude"
+  ) +
+  # 3) Use a quick map ratio (close to Mercator visually)
+  coord_quickmap(xlim = c(-180, 180), ylim = c(-90, 90)) +
+  # 4) Turn on lat/long lines at chosen intervals
+  scale_x_continuous(breaks = seq(-180, 180, by = 60)) +
+  scale_y_continuous(breaks = seq(-90, 90, by = 30)) +
+  # 5) Apply a cowplot theme, then override background/grid
+  theme_cowplot(12) +
+  theme(
+    # Ocean background
+    panel.background = element_rect(fill = "#7474a7", color = NA),
+    # Dashed white lines for lat/long
+    panel.grid.major = element_line(color = "white", linetype = "dashed")
+  )
+
+(unexploited_map <- ggplot() +
+  geom_hex(
+    data = obis_clean_all_decapods, 
+    aes(x = decimalLongitude, y = decimalLatitude),
+    bins = 30
+  ) +
+  # Land polygons
+  geom_map(
+    data = world_map, map = world_map,
+    aes(x = long, y = lat, map_id = region),
+    fill = "#234145",     # Land color
+    color = "black", 
+    size = 0.1
+  ) +
+  scale_fill_viridis_c(option = "C", trans = "log", guide = guide_colorbar(label = FALSE)) +
+  labs(
+    x = "Longitude", 
+    y = "Latitude",
+    fill = "'Abundance'"
+  ) +
+  coord_quickmap(xlim = c(-180, 180), ylim = c(-90, 90)) +
+  # Add lat/long grid lines **on top**
+  geom_hline(yintercept = seq(-90, 90, by = 30), color = "white", linetype = "dashed", alpha = 0.5) +
+  geom_vline(xintercept = seq(-180, 180, by = 60), color = "white", linetype = "dashed", alpha = 0.5) +
+  # Apply a cowplot theme, then override background/grid
+  theme_cowplot(12) +
+  theme(
+    panel.background = element_rect(fill = "#7474a7", color = NA)
+  ))
+```
+
+
+```{r OBIS data visualization}
+# Occurence trends, by region (decapods)
+(decapoda_region <- obis_exploited_regions_df %>%
+  group_by(date, ocean) %>%
+  summarize(count = sum(count)) %>%
+  filter(!is.na(ocean)) %>%
+      ggplot(aes(x = date, y = log(count), color = ocean, fill = ocean)) +  # Fill added here
+      geom_line() +
+      geom_point(size = 0.5) +
+      geom_smooth(method = "gam", alpha = 0.3) +  # Remove color, keep fill
+      theme_light() +
+      labs(x = "", y = "Log transformed decapoda count", color = "Region", fill = "Region") +
+      scale_color_manual(values = pnw_palette("Bay", 8)) +  # Assign colors to lines
+      scale_fill_manual(values = pnw_palette("Bay", 8)) +   # Assign same colors to fill
+      facet_wrap(~ ocean, ncol = 2) +
+      guides(color = "none", fill = "none") +
+  theme(strip.text = element_text(size = 10)))
+
+# Occurece data trends, globally (exploited decapods)
+(decapoda_global_trends <- obis_clean %>%
+  group_by(date) %>%
+  summarize(count = sum(count)) %>%
+      ggplot(aes(x = date, y = log(count))) +
+      geom_line() +
+      theme_light() +
+      labs(x = "", y = " Log transformed decapoda count") +
+      geom_point() +
+      geom_smooth(color = "#E29A86", method = "gam", fill = "#E29A86"))
+
+# Occurece data trends, globally (unexploited decapods)
+(decapoda_unexploited_global_trends <- all_decapods_obis %>%
+  group_by(date) %>%
+  summarize(count = sum(count)) %>%
+    filter(date > make_date(18, 1, 1)) %>%
+      ggplot(aes(x = date, y = log(count))) +
+      geom_line() +
+      theme_light() +
+      labs(x = "", y = " Log transformed decapoda count") +
+      geom_point() +
+      geom_smooth(color = "#E29A86", method = "gam", fill = "#E29A86"))
+
+# Occurece data trends, globally by families within decapods
+
+
+(decapoda_family_trends <- obis_clean_all_decapods %>%
+  group_by(date, family) %>%
+  summarize(count = sum(count)) %>%
+  group_by(family) %>%
+  mutate(num_years = n_distinct(date)) %>%
+  filter(num_years >= 10) %>%
+      ggplot(aes(x = date, y = log(count), color = family)) +
+      geom_line() +
+      theme_light() +
+      labs(x = "", y = "Log observations recorded") +
+      geom_point() +
+      facet_wrap(~ family) +
+  guides(color = "none") +
+  scale_color_manual(values = pnw_palette("Bay",16)))
+
+# Look at the effect the number of sites has in the collected data
+obis_exploited_regions_df %>%
+  group_by(date) %>%
+  summarize(count = sum(count), n = n_distinct(eventID)) %>%
+  ggplot(aes(x = date, y = log(count), color = log(n))) +
+  geom_point() +
+  geom_smooth(method = "gam") +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(color = "# surveys", x = "", y = "Log decapoda count") +
+  ylim(0,17.5)
+
+# Try to correct for sites
+obis_exploited_regions_df %>%
+  group_by(date) %>%
+  summarize(count = sum(count), n = n_distinct(eventID)) %>%
+  mutate(count_adjusted = count / n) %>%
+  ggplot(aes(x = date, y = log(count_adjusted), color = log(n))) +
+  geom_point() +
+  geom_smooth(method = "gam") +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(color = "# surveys", x = "", y = "Log decapoda count") +
+  ylim(0,17.5)
+
+obis_exploited_regions_df %>%
+  group_by(date) %>%
+  mutate(count = as.numeric(organismQuantity)) %>%
+  summarize(count = sum(count), n = n_distinct(eventID)) %>%
+  mutate(count_adjusted = count / n) %>%
+  ggplot(aes(x = date, y = log(count_adjusted), color = log(n))) +
+  geom_point() +
+  geom_smooth(method = "gam") +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(color = "# surveys", x = "", y = "Log decapoda count") +
+  ylim(0,17.5)
+
+# Try to correct for sites
+(decapoda_region <- obis_exploited_regions_df %>%
+  group_by(date, ocean) %>%
+  summarize(count = sum(count), n = n_distinct(eventID)) %>%
+  filter(!is.na(ocean)) %>%
+  mutate(count_adjusted = count / n) %>%
+  ggplot(aes(x = date, y = log(count_adjusted), color = ocean, size = n)) +
+  geom_point() +
+  geom_smooth(method = "gam") +
+  labs(color = "# Survey teams", x = "", y = "Log decapoda count") +
+  ylim(0,17.5) +
+  scale_color_manual(values = pnw_palette("Bay", 8)) +  # Assign colors to lines
+      scale_fill_manual(values = pnw_palette("Bay", 8)) +   # Assign same colors to fill
+      facet_wrap(~ ocean, ncol = 2) +
+      guides(color = "none", fill = "none") +
+  scale_size(range = c(0.25, 2)) +
+  labs(size = "# survey teams"))
+```
+
+```{r look at ecobase data}
+shelf <- read_csv("../data/Shelf.csv")
+
+# Decapoda biomass
+decapoda_biomass <- shelf %>%
+  filter(Species %in% exploited_decapods_common) %>%
+  group_by(System) %>%
+  summarize(total_biomass = sum(Biomass))
+
+# Total biomass
+total_biomass <- shelf %>%
+  filter(Biomass >= 0, System %in% decapoda_biomass$System) %>%
+  group_by(System) %>%
+  summarize(total_biomass = sum(Biomass))
+
+# Decapoda proportion of total biomass
+left_join(decapoda_biomass %>%
+    rename(decapoda_biomass = "total_biomass"), total_biomass) %>%
+  group_by(System) %>%
+  summarize(prop_biomass = round(decapoda_biomass / total_biomass, 3))
+total_biomass
+```
+
+
+```{r fao capture data}
+# Load in effort data
+write_parquet(effort, "../data/effort.parquet")
+effort <- read_parquet("../data/effort.parquet")
+effort <- effort %>%
+  group_by(Year, Country) %>%
+  summarize(EffActive = sum(EffActive))
+unique(effort$Year)
+
+# Load in aquaculture group data
+capture_trends <- read_csv("../data/global_capture/Capture_Quantity.csv")
+
+# Get species names
+capture_species_names <- read_csv("../data/global_capture/CL_FI_SPECIES_GROUPS.csv")
+
+# Country table
+capture_country_data <- read_csv("../data/global_capture/CL_FI_COUNTRY_GROUPS.csv")
+
+
+
+# Join aquaculture and taxonomic data
+fao_capture_data <- left_join(capture_trends,
+          capture_species_names[,c("3A_Code", 
+                               "Name_En", 
+                               "Scientific_Name", 
+                               "Major_Group")], 
+          by = c("SPECIES.ALPHA_3_CODE" = "3A_Code"))
+
+# Join (capture + taxaonomic data) to country data
+fao_capture_data <- left_join(fao_capture_data,
+          capture_country_data[,c("UN_Code", "ISO3_Code")],
+          by = c("COUNTRY.UN_CODE" = "UN_Code"))
+
+# Join capture + effort data
+fao_capture_data <- left_join(fao_capture_data,
+          effort,
+          by = c("PERIOD" = "Year", "ISO3_Code" = "Country")) %>%
+          filter(!is.na(EffActive))
+
+#  Look at capture data, corrected by fishing effort
+(capture_quantity_uncorrected <- fao_capture_data %>%
+  exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
+  filter(str_detect(Name_En, "shrimp") |
+         str_detect(Scientific_Name, "Decapoda")) %>%
+  group_by(PERIOD, region) %>%
+  summarize(total_value = sum(VALUE),
+            effort_continent = sum(EffActive),
+            corrected_value = total_value / effort_continent) %>%
+    filter(!is.na(region)) %>%
+  ggplot(aes(x = PERIOD, y = total_value, color = region)) +
+  geom_line(size = 1) +
+  geom_point(size = 1) +
+  scale_color_manual(values = artis_palette(7)) +
+  theme_light() +
+  labs(color = "Region", x = "", y = "Shrimp volume (tons)") +
+    theme(legend.position = "bottom") +
+    theme_minimal_hgrid(12))
+
+# Corrected, untranfsormed decapoda capture quantity
+(capture_quantity_corrected_untransformed <- fao_capture_data %>%
+  exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
+  filter(str_detect(Name_En, "shrimp") |
+         str_detect(Scientific_Name, "Decapoda")) %>%
+  group_by(PERIOD, region) %>%
+  summarize(total_value = sum(VALUE),
+            effort_continent = sum(EffActive),
+            corrected_value = total_value / effort_continent) %>%
+    filter(!is.na(region)) %>%
+  ggplot(aes(x = PERIOD, y = corrected_value, color = region)) +
+  geom_line(size = 1) +
+  geom_point(size = 1) +
+  scale_color_manual(values = artis_palette(7)) +
+  theme_light() +
+  labs(color = "Region", x = "", y = "Shrimp volume (tons) /\nkW x fishing hours") +
+    theme(legend.position = "bottom") +
+    theme_minimal_hgrid(12))
+
+# Corrected, tranfsormed decapoda capture quantity
+(capture_quantity_corrected_transformed <- fao_capture_data %>%
+  exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
+  filter(str_detect(Name_En, "shrimp") |
+         str_detect(Scientific_Name, "Decapoda")) %>%
+  group_by(PERIOD, region) %>%
+  summarize(total_value = sum(VALUE),
+            effort_continent = sum(EffActive),
+            corrected_value = total_value / effort_continent) %>%
+    filter(!is.na(region)) %>%
+  ggplot(aes(x = PERIOD, y = log(corrected_value), color = region)) +
+  geom_line(size = 1) +
+  geom_point(size = 1) +
+  scale_color_manual(values = artis_palette(7)) +
+  theme_light() +
+  labs(color = "Region", x = "", y = "Log trasnformed\nshrimp volume (tons) /\nkW x fishing hours") +
+    theme(legend.position = "bottom") +
+    theme_minimal_hgrid(12))
+
+# Fishing effort amount
+(fishing_effort <- fao_capture_data %>%
+  exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
+  filter(str_detect(Name_En, "shrimp") |
+         str_detect(Scientific_Name, "Decapoda")) %>%
+  group_by(PERIOD, region) %>%
+  summarize(total_value = sum(VALUE),
+            effort_continent = sum(EffActive),
+            corrected_value = total_value / effort_continent) %>%
+    filter(!is.na(region)) %>%
+  ggplot(aes(x = PERIOD, y = effort_continent, color = region)) +
+  geom_line(size = 1) +
+  geom_point(size = 1) +
+  scale_color_manual(values = artis_palette(7)) +
+  theme_light() +
+  labs(color = "Region", x = "", y = "kW x fishing hour") +
+    theme(legend.position = "bottom") +
+    theme_minimal_hgrid(12))
+
+
+# Legend
+legend <- get_legend(
+  # create some space to the left of the legend
+  fishing_effort + theme(legend.box.margin = margin(0, 0, 0, 12))
+)
+
+# Map legend
+legend_2 <- get_legend(
+  # create some space to the left of the legend
+  unexploited_map + theme(legend.box.margin = margin(0, 0, 0, 12))
+)
+
+(legends <- plot_grid(legend,
+          legend_2,
+          nrow = 2))
+
+# Cowplot grid
+fig_matrix <- plot_grid(
+  fishing_effort + theme(legend.position = "none",
+                         axis.title=element_text(size=8)),
+  capture_quantity_uncorrected + theme(legend.position = "none",
+                                       axis.title=element_text(size=8)),
+  capture_quantity_corrected_untransformed + theme(legend.position = "none",
+                                                   axis.title=element_text(size=8)),
+  capture_quantity_corrected_transformed + theme(legend.position = "none",
+                                                 axis.title=element_text(size=8)),
+  labels = c("A", "B", "C", "D"),
+  ncol = 2
+)
+
+(fig_matrix_2 <- plot_grid(fig_matrix,
+          unexploited_map +
+            guides(fill = "none"),
+          nrow = 2,
+          rel_heights = c(1,0.66),
+          labels = c("A", "E")))
+
+
+
+# Combine the 2x2 grid with the legend on the right
+(final_plot <- plot_grid(
+  fig_matrix_2,
+  legends,
+  rel_widths = c(1, 0.2),
+  ncol = 2
+))
+```
+
+```{r Save images}
+ggsave("images/all_species_count_map.jpg", plot = all_species_count_map, device = "jpeg", width = 6, height = 4)
+
+ggsave("images/all_genus_count_map.jpg", plot = all_genus_count_map, device = "jpeg", width = 6, height = 4)
+
+ggsave("images/commercial_species_count_map.jpg", plot = commercial_species_count_map, device = "jpeg", width = 6, height = 4)
+
+ggsave("images/commercial_genus_count_map.jpg", plot = commercial_genus_count_map, device = "jpeg", width = 6, height = 4)
+
+ggsave("images/introduced_species_map.jpg", plot = introduced_species_map, device = "jpeg", width = 6, height = 4)
+
+ggsave("images/introduced_genus_map.jpg", plot = introduced_genus_map, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/species_hdi.jpg", plot = species_hdi, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/genus_hdi.jpg", plot = genus_hdi, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/species_box.jpg", plot = species_box, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/genus_box.jpg", plot = genus_box, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_total.jpg", plot = decapoda_total, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_country.jpg", plot = decapoda_country, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/ostracoda_total.jpg", plot = ostracoda_total, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/ostracoda_country.jpg", plot = ostracoda_country, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_family_trends.jpg", plot = decapoda_family_trends, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_global_trends.jpg", plot = decapoda_global_trends, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_unexploited_global_trends.jpg", plot = decapoda_unexploited_global_trends, device = "jpeg", width = 6, height = 4)
+
+ggsave("../images/decapoda_region.jpg", plot = decapoda_region, device = "jpeg", width = 7, height = 5, dpi = 300)
+
+ggsave("../images/aquaculture_quantity.jpg", plot = aquaculture_quantity, device = "jpeg", width = 5, height = 4, dpi = 300)
+
+ggsave("../images/aquaculture_value.jpg", plot = aquaculture_value, device = "jpeg", width = 5, height = 4, dpi = 300)
+
+ggsave("../images/aquaculture_quantity_untransformed.jpg", plot = aquaculture_quanttiy_untransformed, device = "jpeg", width = 5, height = 4, dpi = 300)
+
+ggsave("../images/aquaculture_value_untransformed.jpg", plot = aquaculture_value_untransformed, device = "jpeg", width = 5, height = 4, dpi = 300)
+
+ggsave("../images/final_decapoda_trends.jpg", final_plot, width = 8, height = 5, dpi = 300)
+```
