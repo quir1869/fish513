@@ -311,6 +311,9 @@ fao_capture_data <- left_join(fao_capture_data,
 (capture_quantity_uncorrected <- fao_capture_data %>%
   exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
   filter(str_detect(Name_En, "shrimp") |
+           str_detect(Name_En, "lobster") |
+           str_detect(Name_En, "crab") |
+           str_detect(Name_En, "prawn") |
          str_detect(Scientific_Name, "Decapoda")) %>%
   group_by(PERIOD, region) %>%
   summarize(total_value = sum(VALUE),
@@ -349,6 +352,9 @@ fao_capture_data <- left_join(fao_capture_data,
 (capture_quantity_corrected_transformed <- fao_capture_data %>%
   exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
   filter(str_detect(Name_En, "shrimp") |
+           str_detect(Name_En, "lobster") |
+           str_detect(Name_En, "crab") |
+           str_detect(Name_En, "prawn") |
          str_detect(Scientific_Name, "Decapoda")) %>%
   group_by(PERIOD, region) %>%
   summarize(total_value = sum(VALUE),
@@ -382,17 +388,110 @@ fao_capture_data <- left_join(fao_capture_data,
   labs(color = "Region", x = "", y = "kW x fishing hour") +
     theme(legend.position = "bottom") +
     theme_minimal_hgrid(12))
+```
 
+```{r analyze ram legacy data}
+# Read in RAM legacy data
+load("C:/Users/cjqui/Desktop/2024-2025 School Year/2025 Winter/FISH 513/version_controlled/fish513/data/RAMLDB v4.66/RAMLDB v4.66/R Data/DBdata[asmt][v4.66].RData")
 
-# Legend
-legend <- get_legend(
+# Obtain timeseries stocks for decapods
+decapods <- timeseries_values_views %>% 
+  filter(str_detect(stocklong, "shrimp") |
+           str_detect(stocklong, "crab")|
+           str_detect(stocklong, "lobster") |
+           str_detect(stocklong, "prawn")) %>%
+  pull(stockid)
+
+# Get list of unique decapods
+decapods <- unique(decapods)
+
+# Obtain only time series values that contain decapods
+decapod_ts <-timeseries_values_views %>%
+  filter(stockid %in% decapods)
+
+# Join decapod time series with FAO area delineations
+joined_decapods <- left_join(decapod_ts, stock[,c("stockid","primary_FAOarea")], by = "stockid") %>%
+  relocate(primary_FAOarea, .after = "stocklong")
+
+# Produce TBbest means across years for each stock
+tBbest_data <- joined_decapods %>%
+  filter(!is.na(TBbest), year > 1950) %>% 
+  group_by(stockid) %>%
+  summarize(mean_TBbest = mean(TBbest))
+
+# Collect previously used stocks (to exclude for next anaylsis)
+already_used_stocks <- tBbest_data %>%
+  pull(stockid)
+
+# Produce TbdivTBmsy means across years for each stocks, excluding stocks that already had TBbest calculations
+tBbest_div_data <- joined_decapods %>% 
+  filter(!is.na(TBdivTBmsy), year > 1950) %>% 
+  group_by(stockid) %>%
+  summarize(mean_TB_div = mean(TBdivTBmsy)) %>%
+  filter(!stockid %in% already_used_stocks)
+
+# Add to excluded values
+already_used_stocks <- c(already_used_stocks, unique(tBbest_div_data$stockid))
+
+# Calculate mean CPUE for every stock that doesnt have TBbest or TBbestdiv
+cpue_data <- joined_decapods %>% 
+  filter(!is.na(CPUE), year > 1950) %>% 
+  group_by(stockid) %>%
+  summarize(mean_cpue = mean(CPUE)) %>%
+  filter(!stockid %in% already_used_stocks)
+
+# Join mean data across metrics
+joined_means <- full_join(tBbest_data, tBbest_div_data)
+joined_means <- full_join(joined_means, cpue_data)
+  
+# Join decapod data
+joined_decapods <- left_join(joined_decapods, joined_means, by = "stockid")
+
+# Produce relative index variable that is based of demeaned variables
+best_relative_ram_data <- joined_decapods %>%
+  filter(year > 1950) %>%
+  group_by(stockid, year) %>%
+  mutate(best = case_when(
+    !is.na(mean_TBbest) ~ TBbest / mean_TBbest,
+    !is.na(mean_TB_div) ~ TBdivTBmsy / mean_TB_div,
+    !is.na(mean_cpue) ~ CPUE / mean_cpue,
+    TRUE ~ NA)) %>%
+  filter(!is.na(best))
+
+# Produce a boxplot, separating by FAO area
+best_relative_ram_data %>%
+  ggplot(aes(x = reorder(primary_FAOarea, -best, FUN = median), 
+             y = best)) +
+  geom_boxplot() +
+  scale_y_continuous(breaks = seq(0, 15, by = 2)) +
+  theme_minimal_hgrid(12) +
+  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1, alpha = 0.6) +
+  labs(x = "FAO area", y = "Relative performance index")
+
+# Produce a boxplot, separating my year
+(ram_data <- best_relative_ram_data %>%
+  ggplot(aes(x = factor(year), y = best)) +
+           geom_boxplot() +
+  scale_x_discrete(breaks = seq(1950, 2022, by = 10)) +
+  scale_y_continuous(breaks = seq(0, 15, by = 2)) +
+  theme_minimal_hgrid(12) +
+  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1) +
+  labs(x = "", y = "Relative performance index\nacross stocks, across FAO areas"))
+
+# readRDS("../data/decapods_tbbest.rds")
+# saveRDS(decapods_tbbest, "../data/decapods_tbbest.rds")
+```
+
+```{r aggregate graphics}
+# Obtain legends for plots
+legend_1 <- get_legend(
   # create some space to the left of the legend
-  fishing_effort + theme(legend.box.margin = margin(0, 0, 0, 12))
+  capture_quantity_corrected_transformed + theme(
+    legend.box.margin = margin(0, 0, 0, 12),
+    legend.key.size = unit(0.3, "cm"),  # Adjust legend key size
+    legend.text = element_text(size = 8),  # Adjust legend text size
+    legend.title = element_text(size = 10))
 )
-
-(legends <- plot_grid(legend,
-          legend_2,
-          nrow = 2))
 
 # Cowplot grid
 fig_matrix <- plot_grid(
@@ -400,101 +499,26 @@ fig_matrix <- plot_grid(
                          axis.title=element_text(size=8)),
   capture_quantity_uncorrected + theme(legend.position = "none",
                                        axis.title=element_text(size=8)),
-  capture_quantity_corrected_untransformed + theme(legend.position = "none",
-                                                   axis.title=element_text(size=8)),
   capture_quantity_corrected_transformed + theme(legend.position = "none",
                                                  axis.title=element_text(size=8)),
+  ram_data + theme(legend.position = "none",
+                   axis.title=element_text(size=8),
+                   axis.text = element_text(size = 4),
+                   strip.text.x = element_text(size = 8),
+                   plot.caption = element_text(size = 8)),
   labels = c("A", "B", "C", "D"),
   ncol = 2
 )
 
-
-
 # Combine the 2x2 grid with the legend on the right
 (final_plot <- plot_grid(
   fig_matrix,
-  legend,
+  legend_1,
   rel_widths = c(1, 0.2),
   ncol = 2
 ))
 ```
 
-```{r analyze ram legacy data}
-# Read in RAM legacy data
-load("C:/Users/cjqui/Desktop/2024-2025 School Year/2025 Winter/FISH 513/version_controlled/fish513/data/RAMLDB v4.66/RAMLDB v4.66/R Data/DBdata[asmt][v4.66].RData")
-
-# metadata gives scientific names
-decapod_stock_assessments <- bioparams_values_views %>%
-  filter(str_detect(stockid, "shrimp") |
-         str_detect(stocklong, "shrimp") |
-           str_detect(stockid, "crab") |
-         str_detect(stocklong, "crab") |
-           str_detect(stockid, "lobster") |
-         str_detect(stocklong, "lobster") |
-           str_detect(stockid, "prawn") |
-         str_detect(stocklong, "prawn"))
-
-# Join decapod stock assessments with scientific names
-decapod_stock_assessments <- decapod_stock_assessments %>%
-  left_join(metadata[, !colnames(metadata) %in% "stocklong"], by = "stockid")
-
-# Join to taxonomy names to get higher taxa level names
-decapod_stock_assessments <- decapod_stock_assessments %>%
-  left_join(taxonomy, by = "scientificname")
-
-# Exploited decapods
-decapod_stock_assessments %>%
-  mutate(scientificname = str_to_lower(scientificname)) %>%
-  filter(scientificname %in% unique(exploited_decapods))
-
-decapod_stock_assessments %>%
-  mutate(scientificname = str_to_lower(scientificname)) %>%
-  filter(scientificname %in% unique(unexploited_decapods))
-
-# Join time series stock assessment values to
-timeseries_stock_assessments <- timeseries_values_views %>%
-  filter(str_detect(stockid, "shrimp") |
-         str_detect(stocklong, "shrimp") |
-           str_detect(stockid, "crab") |
-         str_detect(stocklong, "crab") |
-           str_detect(stockid, "lobster") |
-         str_detect(stocklong, "lobster") |
-           str_detect(stockid, "prawn") |
-         str_detect(stocklong, "prawn"),
-         year == 2015) %>%
-  left_join(metadata[, !colnames(metadata) %in% "stocklong"], by = "stockid")
-
-# Number exploited assessments
-num_exploited_assessments <- timeseries_stock_assessments %>%
-  mutate(scientificname = str_to_lower(scientificname)) %>%
-  filter(scientificname %in% unique(exploited_decapods),
-         !is.na(TB)) %>%
-  nrow()
-
-# Number of unexploited assessments
-num_unexploited_assessments <- timeseries_stock_assessments %>%
-  mutate(scientificname = str_to_lower(scientificname)) %>%
-  filter(!scientificname %in% unique(exploited_decapods),
-         !is.na(TB)) %>%
-  nrow()
-
-
-# Get "total biomass" of exploted decapods
-exploited_biomass <- timeseries_stock_assessments %>%
-  mutate(scientificname = str_to_lower(scientificname)) %>%
-  filter(scientificname %in% unique(exploited_decapods)) %>%
-  summarize(total_biomass = mean(TB, na.rm = TRUE)) # dividing by number of exploited assessments
-
-# "total biomass" of unexploited decapods
-unexploited_biomass <- timeseries_stock_assessments %>%
-  mutate(scientificname = str_to_lower(scientificname)) %>%
-  filter(!scientificname %in% unique(exploited_decapods)) %>%
-  summarize(total_biomass = mean(TB, na.rm = TRUE))
-
-# Proportion of exploited decapoda biomass to total biomass
-exploited_biomass / (exploited_biomass + unexploited_biomass)
-
-```
 
 
 ```{r Save images}
