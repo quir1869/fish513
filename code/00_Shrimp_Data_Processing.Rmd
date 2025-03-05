@@ -480,6 +480,52 @@ best_relative_ram_data %>%
 
 # readRDS("../data/decapods_tbbest.rds")
 # saveRDS(decapods_tbbest, "../data/decapods_tbbest.rds")
+
+best_relative_ram_data %>% 
+  group_by(year) %>%
+  summarize(num_stocks = n_distinct(stockid)) %>%
+  ggplot(aes(x = year, y = num_stocks)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal_hgrid() +
+  labs(x = "", y = "Number of stocks")
+
+x <- best_relative_ram_data %>%
+  group_by(stockid) %>%
+  arrange(-year) %>%
+  top_n(n = 1) %>%
+  select(stockid, year, best) %>%
+  ungroup()
+
+
+
+for (i in 1950:max(x$year)) {
+  if (!any(i == x$year)) {
+    new_data <- data.frame(year = i, stockid = "dummy_data", best = 1)
+    y <- bind_rows(y, new_data)
+  }
+}
+
+# Look only at final years of assessments across stocks that have data
+y %>%
+  ggplot(aes(x = factor(year), y = best)) +
+  geom_boxplot() +
+  scale_x_discrete(breaks = seq(1950, 2022, by = 10)) +
+  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1) +
+  theme_minimal_hgrid() +
+  labs(x = "", y = "Relative performance index\nacross stocks, across FAO areas") +
+  annotate("text", x = 10, y = 1.5, label = "Index = 1", color = "red", fontface = "bold")
+
+# Look only at African Lobster stocks between 1950 and 1970 (they're decreasing)
+best_relative_ram_data %>%
+  filter(year > 1950, year < 1970,
+         str_detect(stocklong, "Africa")
+         ) %>%
+  ggplot(aes(x = factor(year), y = best)) +
+  geom_boxplot() +
+  theme_minimal_hgrid() +
+  labs(x = "", y = "RPI (South Africa Lobsters)") +
+  scale_x_discrete(breaks = seq(1950, 1970, by = 5))
 ```
 
 ```{r aggregate graphics}
