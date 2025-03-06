@@ -1,0 +1,5 @@
+TO RUN CODE:
+1. Go into code folder in this directory, and open 00_Shrimp_Data_Processing.Rmd
+2. Code should be able to be run from top to bottom
+
+For any questions, email University of Washington School of Aquatic and Fishery Sciences Graduate Student Connor Quiroz (quir1869@uw.ed)

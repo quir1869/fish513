@@ -13,16 +13,10 @@ library(cowplot)
 
 # Data processing package
 library(tidyverse)
-library(patchwork)
 library(countrycode) # convert countries to iso3c
 
 # Color library
 library(PNWColors)
-
-# Map creation
-library(rnaturalearth)
-library(rnaturalearthdata)
-library(sf)
 
 # For Packages for fishbase
 # remotes::install_github("cboettig/duckdbfs", force = TRUE)
@@ -33,14 +27,8 @@ library(rfishbase)
 # Load in packages needed for ARTIS
 library(devtools)
 library(tidytext)
-# devtools::install_github("davidsjoberg/ggsankey")
-library(ggsankey)
 # devtools::install_github("Seafood-Globalization-Lab/exploreARTIS@v1.0.0", dependencies = TRUE)
 library(exploreARTIS)
-
-# Databases
-library(rgbif)
-library(robis)
 ```
 
 ```{r  Obtain sealifebase data}
@@ -66,7 +54,7 @@ if (!file.exists("data/slb_presences_country.parquet")) {
 
 > Last date obtained: January 7
 
-```{r Read in + analyze sealifebase data}
+```{r Read in + analyze sealifebase data + get list of exploited/unexploited taxa}
 # Read in sealifebase data
 slb <- read_parquet("../data/slb_presenceS_country.parquet")
 slb <- slb %>% 
@@ -81,9 +69,7 @@ slb <- slb %>%
 # Join scinames to common names
 slb <- left_join(slb, slb_common_names[,c(2,4)], by = "SpecCode") %>%
   relocate("ComName", .after = "Species")
-```
 
-```{r analyze OBIS data}
 # Get list of exploited decapods (from sealifebase)
 exploited_decapods <- slb %>%
   filter(Order == "Decapoda", 
@@ -91,6 +77,7 @@ exploited_decapods <- slb %>%
                            "highly commercial",
                            "minor commercial")) %>%
   mutate(ScientificName = str_to_lower(ScientificName)) %>%
+  distinct(ScientificName) %>%
   pull(ScientificName)
 
 exploited_decapods_common <- slb %>%
@@ -99,6 +86,7 @@ exploited_decapods_common <- slb %>%
                            "highly commercial",
                            "minor commercial")) %>%
   mutate(ComName = str_to_lower(ComName)) %>%
+  distinct(ComName)
   pull(ComName)
 
 # get list of unexploited decapods (from sealifebase)
@@ -108,149 +96,19 @@ unexploited_decapods <- slb %>%
                            "highly commercial",
                            "minor commercial")) %>%
   mutate(ScientificName = str_to_lower(ScientificName)) %>%
+  distinct(ScientificName) %>%
   pull(ScientificName)
-
-# Proportion of exploited to unexploited decapods
-length(exploited_decapods) / (length(unexploited_decapods) + length(exploited_decapods))
-
-# Obtain exploited decapod data from OBIS (Needs to be segmented as API won't allow for one large pull)
-exploited_decapods_obis_001_100 <- occurrence(scientificname = exploited_decapods[1:100])
-exploited_decapods_obis_101_200 <- occurrence(scientificname = exploited_decapods[101:200]) 
-exploited_decapods_obis_201_300 <- occurrence(scientificname = exploited_decapods[201:300]) 
-exploited_decapods_obis_301_400 <- occurrence(scientificname = exploited_decapods[301:400]) 
-exploited_decapods_obis_401_435 <- occurrence(scientificname = exploited_decapods[401:435])
-
-# Obtain all decapoda data
-all_decapods_obis <- occurrence(scientificname = "Decapoda")
-
-# Write file to parquet
-write_parquet(all_decapods_obis, "../data/all_decapods_obis.parquet")
-all_decapods_obis <- read_parquet("../data/all_decapods_obis.parquet")
-
-# Combine separated files
-exploited_obis <- bind_rows(exploited_decapods_obis_001_100, 
-                            exploited_decapods_obis_101_200,
-                            exploited_decapods_obis_201_300,
-                            exploited_decapods_obis_301_400,
-                            exploited_decapods_obis_401_435)
-
-# Write file to parquet
-write_parquet(exploited_obis, "../data/exploited_obis.parquet")
-exploited_obis <- read_parquet("../data/exploited_obis.parquet")
-
-# Clean exploited_obis_data
-obis_clean <- exploited_obis %>%  
-mutate(individualCount = as.numeric(individualCount), 
-       date_year = make_date(date_year, 1, 1), iso3 = countrycode(country, origin = "country.name", destination = "iso3c")) %>%
-  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
-  filter(!is.na(individualCount), !is.na(date_year)) %>%
-  rename(date = "date_year", count = "individualCount")
-
-# same thing bug for all decapods
-obis_clean_all_decapods <- all_decapods_obis %>% 
-  filter(!is.na(individualCount), 
-         !scientificName %in% exploited_decapods) %>%
-  mutate(depth = as.numeric(depth),
-         individualCount = as.numeric(individualCount), 
-         date_year = make_date(date_year, 1, 1),
-         year = as.numeric(year),
-         iso3 = countrycode(country, origin = "country.name", destination = "iso3c"),
-         scientificName = str_to_lower(scientificName)) %>%
-  exploreARTIS::add_region("iso3", region.col.name = "region") %>%
-  filter(!is.na(date_year)) %>%
-  rename(date = "date_year", count = "individualCount")
-
-ocean_data <- st_read("../data/GOaS_v1_20211214/goas_v01.shp")
-
-# Convert the dataset to an sf object
-data_sf <- st_as_sf(obis_clean, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
-
-# Join ocean geometry / obis data
-ocean_data <- st_transform(ocean_data, crs = 3857)  
-data_sf <- st_transform(data_sf, crs = 3857)
-ocean_buffered <- st_buffer(ocean_data, dist = 10000)
-joined_data <- st_join(data_sf, ocean_buffered, join = st_intersects)
-obis_exploited_regions <- st_transform(joined_data, crs = 4326)
-
-# Clean joined ocean geometry / obis data and convert back into regular dataframe
-obis_exploited_regions <- obis_exploited_regions %>%
-  rename(ocean = "name")
-obis_exploited_regions_df <- obis_exploited_regions %>% 
-  st_drop_geometry()
-
-world_map <- map_data("world")
-
-# Plot the points on the world map
-ggplot() +
-  geom_hex(
-    data = obis_clean_all_decapods, 
-    aes(x = decimalLongitude, y = decimalLatitude),
-    bins = 30) +
-  # 1) Land polygons
-  geom_map(
-    data = world_map, map = world_map,
-    aes(x = long, y = lat, map_id = region),
-    fill = "#234145",     # Land color
-    color = "black", 
-    size = 0.1
-  ) +
-  scale_fill_viridis_c(option = "C", trans = "log") +
-  labs(
-    ,
-    x = "Longitude", 
-    y = "Latitude"
-  ) +
-  # 3) Use a quick map ratio (close to Mercator visually)
-  coord_quickmap(xlim = c(-180, 180), ylim = c(-90, 90)) +
-  # 4) Turn on lat/long lines at chosen intervals
-  scale_x_continuous(breaks = seq(-180, 180, by = 60)) +
-  scale_y_continuous(breaks = seq(-90, 90, by = 30)) +
-  # 5) Apply a cowplot theme, then override background/grid
-  theme_cowplot(12) +
-  theme(
-    # Ocean background
-    panel.background = element_rect(fill = "#7474a7", color = NA),
-    # Dashed white lines for lat/long
-    panel.grid.major = element_line(color = "white", linetype = "dashed")
-  )
-
-(unexploited_map <- ggplot() +
-  geom_hex(
-    data = obis_clean_all_decapods, 
-    aes(x = decimalLongitude, y = decimalLatitude),
-    bins = 30
-  ) +
-  # Land polygons
-  geom_map(
-    data = world_map, map = world_map,
-    aes(x = long, y = lat, map_id = region),
-    fill = "#234145",     # Land color
-    color = "black", 
-    size = 0.1
-  ) +
-  scale_fill_viridis_c(option = "C", trans = "log", guide = guide_colorbar(label = FALSE)) +
-  labs(
-    x = "Longitude", 
-    y = "Latitude",
-    fill = "'Abundance'"
-  ) +
-  coord_quickmap(xlim = c(-180, 180), ylim = c(-90, 90)) +
-  # Add lat/long grid lines **on top**
-  geom_hline(yintercept = seq(-90, 90, by = 30), color = "white", linetype = "dashed", alpha = 0.5) +
-  geom_vline(xintercept = seq(-180, 180, by = 60), color = "white", linetype = "dashed", alpha = 0.5) +
-  # Apply a cowplot theme, then override background/grid
-  theme_cowplot(12) +
-  theme(
-    panel.background = element_rect(fill = "#7474a7", color = NA)
-  ))
 ```
-
-```{r look at ecobase data}
+```{r look at ecobase data to determine biomass}
 shelf <- read_csv("../data/Shelf.csv")
-
+ignore.case("HI")
 # Decapoda biomass
 decapoda_biomass <- shelf %>%
-  filter(Species %in% exploited_decapods_common) %>%
+  filter(str_detect(Species, "(?i)shrimp") |
+         str_detect(Species, "(?i)prawn") |
+         str_detect(Species, "(?i)lobster") |
+         str_detect(Species, "(?i)crab") |
+         str_detect(Species, "(?i)crayfish"))%>%
   group_by(System) %>%
   summarize(total_biomass = sum(Biomass))
 
@@ -260,7 +118,7 @@ total_biomass <- shelf %>%
   group_by(System) %>%
   summarize(total_biomass = sum(Biomass))
 
-# Decapoda proportion of total biomass
+# Decapoda proportion of total biomass, by ecosystem
 left_join(decapoda_biomass %>%
     rename(decapoda_biomass = "total_biomass"), total_biomass) %>%
   group_by(System) %>%
@@ -329,25 +187,6 @@ fao_capture_data <- left_join(fao_capture_data,
     theme(legend.position = "bottom") +
     theme_minimal_hgrid(12))
 
-# Corrected, untranfsormed decapoda capture quantity
-(capture_quantity_corrected_untransformed <- fao_capture_data %>%
-  exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
-  filter(str_detect(Name_En, "shrimp") |
-         str_detect(Scientific_Name, "Decapoda")) %>%
-  group_by(PERIOD, region) %>%
-  summarize(total_value = sum(VALUE),
-            effort_continent = sum(EffActive),
-            corrected_value = total_value / effort_continent) %>%
-    filter(!is.na(region)) %>%
-  ggplot(aes(x = PERIOD, y = corrected_value, color = region)) +
-  geom_line(size = 1) +
-  geom_point(size = 1) +
-  scale_color_manual(values = artis_palette(7)) +
-  theme_light() +
-  labs(color = "Region", x = "", y = "Shrimp volume (tons) /\nkW x fishing hours") +
-    theme(legend.position = "bottom") +
-    theme_minimal_hgrid(12))
-
 # Corrected, tranfsormed decapoda capture quantity
 (capture_quantity_corrected_transformed <- fao_capture_data %>%
   exploreARTIS::add_region("ISO3_Code", region.col.name = "region") %>%
@@ -392,21 +231,19 @@ fao_capture_data <- left_join(fao_capture_data,
 
 ```{r analyze ram legacy data}
 # Read in RAM legacy data
-load("C:/Users/cjqui/Desktop/2024-2025 School Year/2025 Winter/FISH 513/version_controlled/fish513/data/RAMLDB v4.66/RAMLDB v4.66/R Data/DBdata[asmt][v4.66].RData")
+load("../data/RAMLDB v4.66/RAMLDB v4.66/R Data/DBdata[asmt][v4.66].RData")
 
-# Obtain timeseries stocks for decapods
+# Obtain timeseries stocks for unique decapod stocks
 decapods <- timeseries_values_views %>% 
   filter(str_detect(stocklong, "shrimp") |
            str_detect(stocklong, "crab")|
            str_detect(stocklong, "lobster") |
            str_detect(stocklong, "prawn")) %>%
+  distinct(stockid) %>%
   pull(stockid)
 
-# Get list of unique decapods
-decapods <- unique(decapods)
-
 # Obtain only time series values that contain decapods
-decapod_ts <-timeseries_values_views %>%
+decapod_ts <- timeseries_values_views %>%
   filter(stockid %in% decapods)
 
 # Join decapod time series with FAO area delineations
@@ -458,29 +295,7 @@ best_relative_ram_data <- joined_decapods %>%
     TRUE ~ NA)) %>%
   filter(!is.na(best))
 
-# Produce a boxplot, separating by FAO area
-best_relative_ram_data %>%
-  ggplot(aes(x = reorder(primary_FAOarea, -best, FUN = median), 
-             y = best)) +
-  geom_boxplot() +
-  scale_y_continuous(breaks = seq(0, 15, by = 2)) +
-  theme_minimal_hgrid(12) +
-  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1, alpha = 0.6) +
-  labs(x = "FAO area", y = "Relative performance index")
-
-# Produce a boxplot, separating my year
-(ram_data <- best_relative_ram_data %>%
-  ggplot(aes(x = factor(year), y = best)) +
-           geom_boxplot() +
-  scale_x_discrete(breaks = seq(1950, 2022, by = 10)) +
-  scale_y_continuous(breaks = seq(0, 15, by = 2)) +
-  theme_minimal_hgrid(12) +
-  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1) +
-  labs(x = "", y = "Relative performance index\nacross stocks, across FAO areas"))
-
-# readRDS("../data/decapods_tbbest.rds")
-# saveRDS(decapods_tbbest, "../data/decapods_tbbest.rds")
-
+# Number of decapod stocks per year that have data
 best_relative_ram_data %>% 
   group_by(year) %>%
   summarize(num_stocks = n_distinct(stockid)) %>%
@@ -490,42 +305,80 @@ best_relative_ram_data %>%
   theme_minimal_hgrid() +
   labs(x = "", y = "Number of stocks")
 
-x <- best_relative_ram_data %>%
-  group_by(stockid) %>%
-  arrange(-year) %>%
-  top_n(n = 1) %>%
-  select(stockid, year, best) %>%
-  ungroup()
-
-
-
-for (i in 1950:max(x$year)) {
-  if (!any(i == x$year)) {
-    new_data <- data.frame(year = i, stockid = "dummy_data", best = 1)
-    y <- bind_rows(y, new_data)
-  }
-}
-
-# Look only at final years of assessments across stocks that have data
-y %>%
-  ggplot(aes(x = factor(year), y = best)) +
-  geom_boxplot() +
-  scale_x_discrete(breaks = seq(1950, 2022, by = 10)) +
+# Mean performance of stocks by year
+(ram_decapod_performance <- best_relative_ram_data %>%
+  group_by(year) %>%
+  summarize(best = mean(best, na.rm = TRUE)) %>%
+  ggplot(aes(x = year, y = best)) +
+  geom_point() +
+  geom_line() +
+  theme_minimal_hgrid(12) +
   annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1) +
-  theme_minimal_hgrid() +
-  labs(x = "", y = "Relative performance index\nacross stocks, across FAO areas") +
-  annotate("text", x = 10, y = 1.5, label = "Index = 1", color = "red", fontface = "bold")
+  labs(x = "", y = "Mean relative\nperformance index across\nstocks, across FAO areas") +
+  annotate("text", x = 1985, y = 1.25, label = "Average performance", color = "red", fontface = "bold", hjust = 0, size = 3))
 
-# Look only at African Lobster stocks between 1950 and 1970 (they're decreasing)
-best_relative_ram_data %>%
-  filter(year > 1950, year < 1970,
-         str_detect(stocklong, "Africa")
-         ) %>%
-  ggplot(aes(x = factor(year), y = best)) +
+# Calculate lambda(y) (i.e., rate of change in performance by stock, per year)
+lambda_data <- best_relative_ram_data %>%
+  group_by(year, stockid) %>%
+  summarize(best = mean(best, na.rm = TRUE)) %>%
+  mutate(lambda = lead(best) / best) %>%
+  filter(!is.na(lambda)) # Remove NA values from last year
+
+# Create a boxplot of lambda by year
+lambda_data %>%
+ggplot(aes(x = factor(year), y = lambda)) +
+  labs(title = "Boxplot of Lambda by Year",
+       x = "",
+       y = "Lambda (B(y+1) / B(y))") +
   geom_boxplot() +
   theme_minimal_hgrid() +
-  labs(x = "", y = "RPI (South Africa Lobsters)") +
-  scale_x_discrete(breaks = seq(1950, 1970, by = 5))
+  ylim(0, 2) +
+  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1) +
+  annotate("text", x = 2, y = 1.21, label = "Average\nrate of change", color = "red", fontface = "bold", hjust = 0, size = 3) +
+  scale_x_discrete(breaks = seq(1950, 2020, by = 10))
+
+
+# at least 30% of stocks
+lambda_data %>%
+  ungroup() %>%
+  mutate(num_total_stocks = n_distinct(stockid)) %>%
+  group_by(year) %>%
+  mutate(prop_coverage = n_distinct(stockid) / num_total_stocks) %>%
+  ungroup() %>%
+  filter(prop_coverage > 0.3) %>%
+  ggplot(aes(x = factor(year), y = lambda)) +
+  labs(title = "Boxplots of Lambda by Year with\n>30% populations represented",
+       x = "",
+       y = "Lambda (B(y+1) / B(y))",
+       caption = "Red line = average rate of change") +
+  geom_boxplot() +
+  theme_minimal_hgrid() +
+  ylim(0, 2) +
+  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1) +
+  scale_x_discrete(breaks = seq(1950, 2020, by = 10)) +
+  theme(plot.caption = element_text(color = "red", face="bold"),
+        plot.title = element_text(hjust = 0))
+
+# at least 50% of stocks
+lambda_data %>%
+  ungroup() %>%
+  mutate(num_total_stocks = n_distinct(stockid)) %>%
+  group_by(year) %>%
+  mutate(prop_coverage = n_distinct(stockid) / num_total_stocks) %>%
+  ungroup() %>%
+  filter(prop_coverage > 0.5) %>%
+  ggplot(aes(x = factor(year), y = lambda)) +
+  labs(title = "Boxplots of Lambda by Year with\n>50% populations represented",
+       x = "",
+       y = "Lambda (B(y+1) / B(y))",
+       caption = "Red line = average rate of change") +
+  geom_boxplot() +
+  theme_minimal_hgrid() +
+  ylim(0, 2) +
+  annotate("segment", x = -Inf, xend = Inf, y = 1, yend = 1, color = "red", size = 1) +
+  scale_x_discrete(breaks = seq(1950, 2020, by = 10)) +
+  theme(plot.caption = element_text(color = "red", face="bold"),
+        plot.title = element_text(hjust = 0))
 ```
 
 ```{r aggregate graphics}
@@ -547,11 +400,8 @@ fig_matrix <- plot_grid(
                                        axis.title=element_text(size=8)),
   capture_quantity_corrected_transformed + theme(legend.position = "none",
                                                  axis.title=element_text(size=8)),
-  ram_data + theme(legend.position = "none",
-                   axis.title=element_text(size=8),
-                   axis.text = element_text(size = 4),
-                   strip.text.x = element_text(size = 8),
-                   plot.caption = element_text(size = 8)),
+  ram_decapod_performance +
+    theme(axis.title=element_text(size=8)),
   labels = c("A", "B", "C", "D"),
   ncol = 2
 )
@@ -568,49 +418,5 @@ fig_matrix <- plot_grid(
 
 
 ```{r Save images}
-ggsave("images/all_species_count_map.jpg", plot = all_species_count_map, device = "jpeg", width = 6, height = 4)
-
-ggsave("images/all_genus_count_map.jpg", plot = all_genus_count_map, device = "jpeg", width = 6, height = 4)
-
-ggsave("images/commercial_species_count_map.jpg", plot = commercial_species_count_map, device = "jpeg", width = 6, height = 4)
-
-ggsave("images/commercial_genus_count_map.jpg", plot = commercial_genus_count_map, device = "jpeg", width = 6, height = 4)
-
-ggsave("images/introduced_species_map.jpg", plot = introduced_species_map, device = "jpeg", width = 6, height = 4)
-
-ggsave("images/introduced_genus_map.jpg", plot = introduced_genus_map, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/species_hdi.jpg", plot = species_hdi, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/genus_hdi.jpg", plot = genus_hdi, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/species_box.jpg", plot = species_box, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/genus_box.jpg", plot = genus_box, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/decapoda_total.jpg", plot = decapoda_total, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/decapoda_country.jpg", plot = decapoda_country, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/ostracoda_total.jpg", plot = ostracoda_total, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/ostracoda_country.jpg", plot = ostracoda_country, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/decapoda_family_trends.jpg", plot = decapoda_family_trends, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/decapoda_global_trends.jpg", plot = decapoda_global_trends, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/decapoda_unexploited_global_trends.jpg", plot = decapoda_unexploited_global_trends, device = "jpeg", width = 6, height = 4)
-
-ggsave("../images/decapoda_region.jpg", plot = decapoda_region, device = "jpeg", width = 7, height = 5, dpi = 300)
-
-ggsave("../images/aquaculture_quantity.jpg", plot = aquaculture_quantity, device = "jpeg", width = 5, height = 4, dpi = 300)
-
-ggsave("../images/aquaculture_value.jpg", plot = aquaculture_value, device = "jpeg", width = 5, height = 4, dpi = 300)
-
-ggsave("../images/aquaculture_quantity_untransformed.jpg", plot = aquaculture_quanttiy_untransformed, device = "jpeg", width = 5, height = 4, dpi = 300)
-
-ggsave("../images/aquaculture_value_untransformed.jpg", plot = aquaculture_value_untransformed, device = "jpeg", width = 5, height = 4, dpi = 300)
-
 ggsave("../images/final_decapoda_trends.jpg", final_plot, width = 8, height = 5, dpi = 300)
 ```
